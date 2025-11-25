@@ -1,7 +1,3 @@
-Here is a comprehensive `README.md` for the script. You can save this file alongside your script or use it as the description if you publish it to GreasyFork or GitHub.
-
----
-
 # 🛡️ X/Twitter Mass Blocker (China List)
 
 A robust Userscript to bulk-block over 5,000+ Twitter accounts listed in the [X_based_china repository](https://github.com/pluto0x0/X_based_china).
