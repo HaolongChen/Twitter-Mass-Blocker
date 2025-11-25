@@ -1,6 +1,6 @@
 # 🛡️ X/Twitter Mass Blocker (China List)
 
-A robust Userscript to bulk-block over 8,000+ Twitter accounts listed in the [X_based_china repository](https://github.com/pluto0x0/X_based_china).
+A robust Userscript to bulk-block over 9,000+ Twitter accounts listed in the [X_based_china repository](https://github.com/pluto0x0/X_based_china).
 
 This script is designed to run directly in your browser while you are logged into X.com. It handles API rate limits, synchronizes with your existing block list to avoid redundant work, and supports concurrent processing for efficiency.
 

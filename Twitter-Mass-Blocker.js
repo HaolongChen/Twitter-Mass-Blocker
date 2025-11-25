@@ -1,9 +1,9 @@
 // ==UserScript==
-// @name         X/Twitter Mass Blocker (v7 - Anti-401 & Auto-Sync)
+// @name         X/Twitter Mass Blocker (v8.1 - Custom Page Crawler)
 // @namespace    http://tampermonkey.net/
-// @version      7.0
-// @description  Fetches existing blocks, diffs with list, blocks concurrent. Refreshes tokens to fix 401 errors.
-// @author       You
+// @version      8.1
+// @description  Crawls index.html, page2.html, page3.html... until 404. Syncs & Blocks.
+// @author       Haolong
 // @match        https://x.com/*
 // @match        https://twitter.com/*
 // @connect      pluto0x0.github.io
@@ -16,8 +16,7 @@
     'use strict';
 
     // --- Configuration ---
-    const LIST_URL = "https://pluto0x0.github.io/X_based_china/";
-    // This is the standard public web client token. It rarely changes.
+    const BASE_URL = "https://pluto0x0.github.io/X_based_china/";
     const BEARER_TOKEN = "Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA";
     const COOLDOWN_TIME = 180000; // 3 minutes pause on 429 error
 
@@ -26,18 +25,9 @@
     let activeThreads = 0;
     let successCount = 0;
     let todoList = [];
-    let concurrency = 2; // Conservative default
+    let concurrency = 2;
     let existingBlocks = new Set();
     let stopSignal = false;
-
-    // --- Helpers ---
-    // FIX FOR 401: We fetch the cookie freshly every time we need it.
-    function getCsrfToken() {
-        const match = document.cookie.match(/(^|;\s*)ct0=([^;]*)/);
-        return match ? match[2] : null;
-    }
-
-    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
     // --- UI Construction ---
     function createUI() {
@@ -47,13 +37,13 @@
         Object.assign(panel.style, {
             position: "fixed", bottom: "20px", left: "20px", zIndex: "99999",
             background: "rgba(10, 10, 10, 0.98)", color: "#e7e9ea", padding: "16px",
-            borderRadius: "12px", width: "340px", fontFamily: "system-ui, -apple-system, sans-serif",
+            borderRadius: "12px", width: "340px", fontFamily: "-apple-system, BlinkMacSystemFont, sans-serif",
             border: "1px solid #333", boxShadow: "0 8px 32px rgba(0,0,0,0.6)"
         });
-
+        
         panel.innerHTML = `
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-                <span style="font-weight:800;color:#f91880;font-size:14px;">Blocker v7 (Anti-401)</span>
+                <span style="font-weight:800;color:#f91880;font-size:14px;">Mass Blocker v8.1</span>
                 <span id="xb-threads-disp" style="font-size:10px;background:#333;padding:2px 6px;borderRadius:4px;">Threads: 2</span>
             </div>
 
@@ -61,28 +51,23 @@
                 <input type="range" id="xb-speed" min="1" max="5" value="2" style="width:100%;accent-color:#f91880;">
             </div>
 
-            <div id="xb-log" style="height:120px;overflow-y:auto;background:#000;border:1px solid #333;padding:8px;font-size:11px;color:#888;margin-bottom:12px;border-radius:4px;font-family:monospace;white-space:pre-wrap;">Ready.</div>
+            <div id="xb-log" style="height:130px;overflow-y:auto;background:#000;border:1px solid #333;padding:8px;font-size:11px;color:#888;margin-bottom:12px;border-radius:4px;font-family:monospace;white-space:pre-wrap;">Ready.</div>
 
             <div style="background:#333;height:6px;width:100%;margin-bottom:12px;border-radius:3px;overflow:hidden;">
                 <div id="xb-bar" style="background:#f91880;height:100%;width:0%;transition:width 0.3s ease;"></div>
             </div>
-
+            
             <div style="display:flex;gap:10px;">
                 <button id="xb-btn" style="flex:1;padding:10px;background:#f91880;color:white;border:none;border-radius:20px;cursor:pointer;font-weight:bold;font-size:13px;">START</button>
                 <button id="xb-stop" style="flex:0.4;padding:10px;background:#333;color:white;border:none;border-radius:20px;cursor:pointer;font-weight:bold;font-size:13px;">STOP</button>
             </div>
         `;
         document.body.appendChild(panel);
-
+        
         document.getElementById("xb-btn").onclick = runFullProcess;
-        document.getElementById("xb-stop").onclick = () => {
-            stopSignal = true;
-            log("🛑 Stopping...", "red");
-            document.getElementById("xb-btn").disabled = false;
-        };
-
-        const slider = document.getElementById("xb-speed");
-        slider.oninput = (e) => {
+        document.getElementById("xb-stop").onclick = () => { stopSignal = true; log("🛑 Stopping...", "red"); };
+        
+        document.getElementById("xb-speed").oninput = (e) => {
             concurrency = parseInt(e.target.value);
             document.getElementById("xb-threads-disp").innerText = `Threads: ${concurrency}`;
         };
@@ -101,37 +86,39 @@
         document.getElementById("xb-btn").innerText = `${pct}% (${done})`;
     }
 
-    // --- API Calls ---
+    // --- Helpers ---
+    function getCsrfToken() {
+        const match = document.cookie.match(/(^|;\s*)ct0=([^;]*)/);
+        return match ? match[2] : null;
+    }
 
-    // Step 1: Get Existing Block List
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+    // --- Step 1: Sync Existing Blocks ---
     async function fetchExistingBlocks() {
-        log("🔄 Syncing existing blocks...", "#1d9bf0");
+        log("🔄 Syncing existing blocks from X...", "#1d9bf0");
         let cursor = -1;
         existingBlocks.clear();
         stopSignal = false;
 
         try {
             while (cursor !== 0 && cursor !== "0" && !stopSignal) {
-                // Get fresh token
                 const csrf = getCsrfToken();
                 if (!csrf) throw new Error("Logged out");
 
                 const url = `https://x.com/i/api/1.1/blocks/ids.json?count=5000&cursor=${cursor}&stringify_ids=true`;
-
+                
                 const res = await fetch(url, {
                     headers: {
                         "authorization": BEARER_TOKEN,
-                        "x-csrf-token": csrf, // Fresh token
-                        "x-twitter-active-user": "yes",
-                        "x-twitter-auth-type": "OAuth2Session",
+                        "x-csrf-token": csrf,
                         "content-type": "application/json"
                     }
                 });
 
                 if (!res.ok) {
-                    if(res.status === 401) throw new Error("401 Unauthorized - Please Re-login");
                     if(res.status === 429) {
-                        log("⚠️ Sync Rate Limit. Waiting 30s...", "orange");
+                        log("⚠️ Sync 429. Waiting 30s...", "orange");
                         await sleep(30000);
                         continue;
                     }
@@ -140,19 +127,75 @@
 
                 const data = await res.json();
                 if (data.ids) data.ids.forEach(id => existingBlocks.add(String(id)));
-
                 cursor = data.next_cursor_str;
-                await sleep(250);
+                await sleep(200); 
             }
             if(stopSignal) return false;
-            log(`✅ Sync Complete: ${existingBlocks.size} blocked.`, "#00ba7c");
+            log(`✅ Sync Complete: ${existingBlocks.size} already blocked.`, "#00ba7c");
             return true;
-
         } catch (e) {
-            log(`❌ Error syncing: ${e.message}`, "red");
-            alert(e.message);
+            log(`❌ Sync Error: ${e.message}`, "red");
             return false;
         }
+    }
+
+    // --- Step 2: Crawl (Corrected URL Pattern) ---
+    function fetchUrlText(url) {
+        return new Promise((resolve, reject) => {
+            GM_xmlhttpRequest({
+                method: "GET",
+                url: url,
+                onload: (res) => {
+                    if (res.status === 200) resolve(res.responseText);
+                    else reject(res.status);
+                },
+                onerror: () => reject("Network Error")
+            });
+        });
+    }
+
+    async function crawlTargetList() {
+        let allFoundIds = new Set();
+        let page = 1;
+        let keepCrawling = true;
+        
+        log("🕸️ Starting Crawler...", "#1d9bf0");
+
+        while(keepCrawling && !stopSignal) {
+            // URL Logic: Page 1 = index.html, Page 2 = page2.html
+            let url = (page === 1) 
+                ? `${BASE_URL}index.html` 
+                : `${BASE_URL}page${page}.html`;
+            
+            document.getElementById("xb-btn").innerText = `Scan Pg ${page}`;
+
+            try {
+                const html = await fetchUrlText(url);
+                
+                // Extract IDs
+                const matches = [...html.matchAll(/ID:\s*(\d+)/g)];
+                const idsOnPage = matches.map(m => m[1]);
+
+                if (idsOnPage.length === 0) {
+                    log(`⚠️ Page ${page} loaded but no IDs found.`);
+                } else {
+                    idsOnPage.forEach(id => allFoundIds.add(id));
+                }
+
+                page++;
+                await sleep(200); // Gentle crawl delay
+
+            } catch (err) {
+                if (err === 404) {
+                    log(`✅ End of list at Page ${page-1}.`, "#00ba7c");
+                    keepCrawling = false; // Stop on 404
+                } else {
+                    log(`❌ Crawl Error Pg ${page}: ${err}`, "red");
+                    keepCrawling = false;
+                }
+            }
+        }
+        return [...allFoundIds];
     }
 
     // --- Main Logic ---
@@ -160,15 +203,15 @@
         const btn = document.getElementById("xb-btn");
         btn.disabled = true;
         stopSignal = false;
-
+        
         // 1. Check Login
         if (!getCsrfToken()) {
-            log("❌ Error: You are logged out.", "red");
+            log("❌ Error: Logged out.", "red");
             btn.disabled = false;
             return;
         }
 
-        // 2. Sync
+        // 2. Sync Blocks
         const syncSuccess = await fetchExistingBlocks();
         if (!syncSuccess) {
             btn.disabled = false;
@@ -176,67 +219,60 @@
             return;
         }
 
-        // 3. Download GitHub List
-        log("⬇️ Fetching target list...", "#1d9bf0");
-        GM_xmlhttpRequest({
-            method: "GET", url: LIST_URL,
-            onload: async function(res) {
-                if(res.status !== 200) {
-                    log("❌ GitHub Download failed.", "red");
-                    btn.disabled = false;
-                    return;
-                }
+        // 3. Crawl Pages
+        const githubIds = await crawlTargetList();
+        if (!githubIds || githubIds.length === 0) {
+            log("❌ No IDs found during crawl.", "red");
+            btn.disabled = false;
+            return;
+        }
 
-                const matches = [...res.responseText.matchAll(/ID:\s*(\d+)/g)];
-                const githubIds = [...new Set(matches.map(m => m[1]))];
+        // 4. Diffing
+        todoList = githubIds.filter(id => !existingBlocks.has(id));
+        const total = todoList.length;
+        const blockedAlready = githubIds.length - total;
 
-                // 4. Diffing
-                todoList = githubIds.filter(id => !existingBlocks.has(id));
-                const total = todoList.length;
+        log(`📄 Found: ${githubIds.length} total.`);
+        log(`⏭️ Skipped: ${blockedAlready} (Already blocked).`);
+        
+        if (total === 0) {
+            log("🎉 All targets are already blocked!", "#00ba7c");
+            updateProgress(1,1);
+            btn.disabled = false;
+            btn.innerText = "Done";
+            return;
+        }
 
-                if (total === 0) {
-                    log("🎉 All targets already blocked!", "#00ba7c");
-                    updateProgress(1,1);
-                    btn.disabled = false;
-                    btn.innerText = "Done";
-                    return;
-                }
-
-                log(`🎯 Targets: ${total} (Diff: ${githubIds.length - total} blocked)`, "#f91880");
-
-                // 5. Start Manager
-                startManager(total);
-            }
-        });
+        log(`🎯 <b>Queued to Block: ${total}</b>`, "#f91880");
+        
+        // 5. Start Blocking
+        startManager(total);
     }
 
     async function startManager(totalInitial) {
-        let processedCount = 0; // Success + Failed
+        let processedCount = 0; 
 
         while ((todoList.length > 0 || activeThreads > 0) && !stopSignal) {
             if (isPaused) { await sleep(1000); continue; }
 
-            // Spawn workers
             while (activeThreads < concurrency && todoList.length > 0 && !isPaused && !stopSignal) {
                 const uid = todoList.shift();
                 processUser(uid, totalInitial);
             }
-
             await sleep(200);
         }
-
+        
         document.getElementById("xb-btn").innerText = stopSignal ? "Stopped" : "Finished";
         document.getElementById("xb-btn").disabled = false;
         if(!stopSignal) log("🏁 Job Finished.", "#00ba7c");
+        alert("Batch Complete");
     }
 
     async function processUser(uid, totalInitial) {
         activeThreads++;
-
         try {
             await sleep(Math.floor(Math.random() * 500) + 300);
 
-            // Fetch Token IMMEDIATELY before request
             const csrf = getCsrfToken();
             if(!csrf) throw new Error("Logout detected");
 
@@ -244,7 +280,7 @@
                 method: "POST",
                 headers: {
                     "authorization": BEARER_TOKEN,
-                    "x-csrf-token": csrf, // KEY FIX for 401
+                    "x-csrf-token": csrf,
                     "content-type": "application/x-www-form-urlencoded",
                     "x-twitter-active-user": "yes",
                     "x-twitter-auth-type": "OAuth2Session"
@@ -256,29 +292,26 @@
                 successCount++;
                 if (successCount % 5 === 0) log(`Blocked: ${uid}`);
             } else if (res.status === 401) {
-                // SESSION DIED
-                log(`❌ 401 Unauthorized. Stopping.`, "red");
-                stopSignal = true;
-                alert("Session expired (401). Please reload the page and log in again.");
+                log(`❌ 401 Session Died. Stopping.`, "red");
+                stopSignal = true; 
             } else if (res.status === 429) {
                 if (!isPaused) {
                     isPaused = true;
                     log(`🛑 Rate Limit 429. Pausing 3m...`, "red");
-                    setTimeout(() => {
-                        isPaused = false;
+                    setTimeout(() => { 
+                        isPaused = false; 
                         log("🟢 Resuming...", "#00ba7c");
                     }, COOLDOWN_TIME);
                 }
-                todoList.push(uid); // Retry later
+                todoList.push(uid); 
                 successCount--;
             } else {
                 log(`⚠️ ${res.status} on ${uid}`, "orange");
             }
-
         } catch (e) {
             log(`❌ Err: ${e.message}`, "red");
             if(e.message.includes("Logout")) stopSignal = true;
-            else todoList.push(uid); // Retry net errors
+            else todoList.push(uid);
             successCount--;
         }
 
